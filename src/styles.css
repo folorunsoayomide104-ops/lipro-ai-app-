@@ -1,0 +1,162 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Instrument Serif", ui-serif, Georgia, "Times New Roman", serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --color-bg: #0b0b0c;
+  --color-surface: #141416;
+  --color-elevated: #1c1c1f;
+  --color-fg: #f2f0eb;
+  --color-muted: #9a9892;
+  --color-subtle: #6e6c67;
+  --color-primary: #b7d4ce;
+  --color-primary-fg: #0b0b0c;
+  --color-border: color-mix(in oklab, var(--color-fg) 12%, transparent);
+  --color-border-strong: color-mix(in oklab, var(--color-fg) 22%, transparent);
+  --color-danger: #c45c4a;
+  --color-ring: #b7d4ce;
+
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-2xl: 28px;
+
+  --shadow-border: 0 0 0 1px rgba(242, 240, 235, 0.08);
+  --shadow-border-hover: 0 0 0 1px rgba(242, 240, 235, 0.13);
+  --shadow-float: 0 18px 40px -24px rgba(0, 0, 0, 0.7);
+
+  --ease-smooth-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background: var(--color-bg);
+    color: var(--color-fg);
+  }
+
+  body {
+    min-height: 100dvh;
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-primary) 35%, transparent);
+    color: var(--color-fg);
+  }
+
+  textarea,
+  input {
+    font: inherit;
+  }
+}
+
+@keyframes aether-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes aether-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+@keyframes aether-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.aether-rise {
+  animation: aether-rise 400ms var(--ease-smooth-out) both;
+}
+
+.aether-rise-delay-1 {
+  animation-delay: 60ms;
+}
+.aether-rise-delay-2 {
+  animation-delay: 120ms;
+}
+.aether-rise-delay-3 {
+  animation-delay: 180ms;
+}
+.aether-rise-delay-4 {
+  animation-delay: 240ms;
+}
+
+.shimmer-text {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-subtle) 0%,
+    var(--color-fg) 45%,
+    var(--color-subtle) 90%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: aether-shimmer 1.6s linear infinite;
+}
+
+.caret-pulse {
+  animation: aether-pulse 1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aether-rise,
+  .aether-rise-delay-1,
+  .aether-rise-delay-2,
+  .aether-rise-delay-3,
+  .aether-rise-delay-4 {
+    animation: none;
+  }
+
+  .shimmer-text {
+    animation: none;
+    color: var(--color-muted);
+    background: none;
+  }
+
+  .caret-pulse {
+    animation: none;
+  }
+}
