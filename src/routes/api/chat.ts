@@ -72,6 +72,10 @@ export const Route = createFileRoute("/api/chat")({
         });
 
         if (!upstreamRes.ok || !upstreamRes.body) {
+          const bodyText = await upstreamRes.text().catch(() => "");
+          console.error(
+            `[chat] ${chatProvider.provider} ${upstreamRes.status} ${chatProvider.baseUrl}: ${bodyText.slice(0, 2000)}`,
+          );
           return Response.json(
             { error: `AI is unavailable (${upstreamRes.status}).` },
             { status: 502 },

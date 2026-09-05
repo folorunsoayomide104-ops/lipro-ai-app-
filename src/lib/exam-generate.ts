@@ -189,6 +189,10 @@ export const generateExamBatch = createServerFn({ method: "POST" })
     });
 
     if (!res.ok) {
+      const bodyText = await res.text().catch(() => "");
+      console.error(
+        `[exam-generate] ${chatProvider.provider} ${res.status} ${chatProvider.baseUrl}: ${bodyText.slice(0, 2000)}`,
+      );
       return { ok: false as const, error: `Could not write questions (${res.status}).` };
     }
 
