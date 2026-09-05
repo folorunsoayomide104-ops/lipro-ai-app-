@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import { resolveChatProvider } from "@/lib/ai-provider";
+import { completeChatWithFallback, resolveChatProvider } from "@/lib/ai-provider";
 import type { FlashCard } from "@/lib/flash-types";
 
 function extractJson(raw: string): unknown {
@@ -41,21 +41,13 @@ export const generateFlashBatch = createServerFn({ method: "POST" })
         ? `\nDo not repeat these fronts:\n${data.exclude.map((s) => `- ${s}`).join("\n")}`
         : "";
 
-    const res = await fetch(chatProvider.baseUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${chatProvider.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: chatProvider.model,
-        stream: false,
-        max_tokens: 2500,
-        ...(chatProvider.supportsJsonMode ? { response_format: { type: "json_object" } } : {}),
-        messages: [
-          {
-            role: "system",
-            content: `You write high-yield revision flashcards from source notes for LIPRO.
+    const result = await completeChatWithFallback("flash-generate", chatProvider, {
+      max_tokens: 2500,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You write high-yield revision flashcards from source notes for LIPRO.
 
 Rules:
 - Use ONLY facts in the notes.
@@ -64,29 +56,24 @@ Rules:
 - Prefer definitions, lists, mechanisms, distinctions, and exam traps.
 - No true/false. No "what is this chapter about".
 Return JSON only: {"cards":[{"front":"...","back":"..."}]}`,
-          },
-          {
-            role: "user",
-            content: `Write ${data.count} flashcards from these notes.${avoid}
+        },
+        {
+          role: "user",
+          content: `Write ${data.count} flashcards from these notes.${avoid}
 
 NOTES:
 """
 ${data.excerpt}
 """`,
-          },
-        ],
-      }),
+        },
+      ],
     });
 
-    if (!res.ok) {
-      const bodyText = await res.text().catch(() => "");
-      console.error(
-        `[flash-generate] ${chatProvider.provider} ${res.status} ${chatProvider.baseUrl}: ${bodyText.slice(0, 2000)}`,
-      );
-      return { ok: false as const, error: `Could not write cards (${res.status}).` };
+    if (!result.ok) {
+      return { ok: false as const, error: `Could not write cards (${result.status}).` };
     }
 
-    const body = (await res.json()) as {
+    const body = result.json as {
       choices?: { message?: { content?: string } }[];
     };
     const content = body.choices?.[0]?.message?.content;

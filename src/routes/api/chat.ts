@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { resolveChatProvider } from "@/lib/ai-provider";
+import { resolveChatProvider, startChatStreamWithFallback } from "@/lib/ai-provider";
 import { auth } from "@/lib/auth/server";
 import { systemPromptFor } from "@/lib/prompts";
 import type { StudioMode } from "@/lib/studio-store";
@@ -55,37 +55,23 @@ export const Route = createFileRoute("/api/chat")({
           return Response.json({ error: "Say something first." }, { status: 400 });
         }
 
-        const upstreamRes = await fetch(chatProvider.baseUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${chatProvider.apiKey}`,
-          },
-          body: JSON.stringify({
-            model: chatProvider.model,
-            stream: true,
-            max_tokens: 1200,
-            messages: [
-              { role: "system", content: systemPromptFor(parsed.mode) },
-              ...parsed.messages,
-            ],
-          }),
+        const streamResult = await startChatStreamWithFallback("chat", chatProvider, {
+          max_tokens: 1200,
+          messages: [
+            { role: "system", content: systemPromptFor(parsed.mode) },
+            ...parsed.messages,
+          ],
         });
 
-        if (!upstreamRes.ok || !upstreamRes.body) {
-          const bodyText = await upstreamRes.text().catch(() => "");
-          console.error(
-            `[chat] ${chatProvider.provider} ${upstreamRes.status} ${chatProvider.baseUrl}: ${bodyText.slice(0, 2000)}`,
-          );
-          return Response.json(
-            { error: `AI is unavailable (${upstreamRes.status}).` },
-            { status: 502 },
-          );
+        if (!streamResult.ok) {
+          return Response.json({ error: streamResult.error }, { status: 502 });
         }
+        const upstreamRes = streamResult.response;
 
         const encoder = new TextEncoder();
         const decoder = new TextDecoder();
-        const upstream = upstreamRes.body.getReader();
+        // startChatStreamWithFallback only returns ok:true once res.body is confirmed present.
+        const upstream = upstreamRes.body!.getReader();
 
         const stream = new ReadableStream({
           async start(controller) {

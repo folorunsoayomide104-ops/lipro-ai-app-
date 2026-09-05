@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import { resolveChatProvider } from "@/lib/ai-provider";
+import { completeChatWithFallback, resolveChatProvider } from "@/lib/ai-provider";
 import type { ExamQuestion, QuestionKind } from "@/lib/exam-types";
 import { shuffleMcqQuestion } from "@/lib/exam-types";
 
@@ -168,36 +168,23 @@ export const generateExamBatch = createServerFn({ method: "POST" })
     if (!providerResult.ok) return { ok: false as const, error: providerResult.error };
     const chatProvider = providerResult.value;
 
-    const res = await fetch(chatProvider.baseUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${chatProvider.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: chatProvider.model,
-        stream: false,
-        max_tokens: 3500,
-        ...(chatProvider.supportsJsonMode ? { response_format: { type: "json_object" } } : {}),
-        messages: [
-          { role: "system", content: systemPrompt() },
-          {
-            role: "user",
-            content: userPrompt(data.excerpt, data.need, data.exclude ?? []),
-          },
-        ],
-      }),
+    const result = await completeChatWithFallback("exam-generate", chatProvider, {
+      max_tokens: 3500,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: systemPrompt() },
+        {
+          role: "user",
+          content: userPrompt(data.excerpt, data.need, data.exclude ?? []),
+        },
+      ],
     });
 
-    if (!res.ok) {
-      const bodyText = await res.text().catch(() => "");
-      console.error(
-        `[exam-generate] ${chatProvider.provider} ${res.status} ${chatProvider.baseUrl}: ${bodyText.slice(0, 2000)}`,
-      );
-      return { ok: false as const, error: `Could not write questions (${res.status}).` };
+    if (!result.ok) {
+      return { ok: false as const, error: `Could not write questions (${result.status}).` };
     }
 
-    const body = (await res.json()) as {
+    const body = result.json as {
       choices?: { message?: { content?: string } }[];
     };
     const content = body.choices?.[0]?.message?.content;
