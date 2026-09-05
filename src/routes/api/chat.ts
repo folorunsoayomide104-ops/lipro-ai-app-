@@ -1,4 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { resolveChatProvider } from "@/lib/ai-provider";
+import { auth } from "@/lib/auth/server";
 import { systemPromptFor } from "@/lib/prompts";
 import type { StudioMode } from "@/lib/studio-store";
 
@@ -34,8 +36,9 @@ export const Route = createFileRoute("/api/chat")({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const apiKey = process.env.XAI_API_KEY;
-        if (!apiKey) {
+        const session = await auth.api.getSession({ headers: request.headers }).catch(() => null);
+        const chatProvider = await resolveChatProvider(session?.user?.id ?? null);
+        if (!chatProvider) {
           return Response.json({ error: "AI is not available right now." }, { status: 503 });
         }
 
@@ -51,14 +54,14 @@ export const Route = createFileRoute("/api/chat")({
           return Response.json({ error: "Say something first." }, { status: 400 });
         }
 
-        const xaiRes = await fetch("https://api.x.ai/v1/chat/completions", {
+        const upstreamRes = await fetch(chatProvider.baseUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
+            Authorization: `Bearer ${chatProvider.apiKey}`,
           },
           body: JSON.stringify({
-            model: "grok-4.5",
+            model: chatProvider.model,
             stream: true,
             max_tokens: 1200,
             messages: [
@@ -68,16 +71,16 @@ export const Route = createFileRoute("/api/chat")({
           }),
         });
 
-        if (!xaiRes.ok || !xaiRes.body) {
+        if (!upstreamRes.ok || !upstreamRes.body) {
           return Response.json(
-            { error: `Grok is unavailable (${xaiRes.status}).` },
+            { error: `AI is unavailable (${upstreamRes.status}).` },
             { status: 502 },
           );
         }
 
         const encoder = new TextEncoder();
         const decoder = new TextDecoder();
-        const upstream = xaiRes.body.getReader();
+        const upstream = upstreamRes.body.getReader();
 
         const stream = new ReadableStream({
           async start(controller) {

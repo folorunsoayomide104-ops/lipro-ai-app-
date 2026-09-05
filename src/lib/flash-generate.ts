@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { resolveChatProvider } from "@/lib/ai-provider";
 import type { FlashCard } from "@/lib/flash-types";
 
 function extractJson(raw: string): unknown {
@@ -26,25 +27,30 @@ export const generateFlashBatch = createServerFn({ method: "POST" })
     }),
   )
   .handler(async ({ data }) => {
-    const apiKey = process.env.XAI_API_KEY;
-    if (!apiKey) return { ok: false as const, error: "AI is not available right now." };
+    // Dynamic import: verify.server.ts pulls in `@tanstack/react-start/server`,
+    // which must never be statically imported into a createServerFn module (see
+    // auth/middleware.ts) — this file also ships a client stub.
+    const { getSessionUser } = await import("@/lib/auth/verify.server");
+    const user = await getSessionUser();
+    const chatProvider = await resolveChatProvider(user?.id ?? null);
+    if (!chatProvider) return { ok: false as const, error: "AI is not available right now." };
 
     const avoid =
       data.exclude && data.exclude.length > 0
         ? `\nDo not repeat these fronts:\n${data.exclude.map((s) => `- ${s}`).join("\n")}`
         : "";
 
-    const res = await fetch("https://api.x.ai/v1/chat/completions", {
+    const res = await fetch(chatProvider.baseUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${chatProvider.apiKey}`,
       },
       body: JSON.stringify({
-        model: "grok-4.5",
+        model: chatProvider.model,
         stream: false,
         max_tokens: 2500,
-        response_format: { type: "json_object" },
+        ...(chatProvider.supportsJsonMode ? { response_format: { type: "json_object" } } : {}),
         messages: [
           {
             role: "system",
