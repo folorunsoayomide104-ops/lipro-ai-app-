@@ -32,8 +32,9 @@ export const generateFlashBatch = createServerFn({ method: "POST" })
     // auth/middleware.ts) — this file also ships a client stub.
     const { getSessionUser } = await import("@/lib/auth/verify.server");
     const user = await getSessionUser();
-    const chatProvider = await resolveChatProvider(user?.id ?? null);
-    if (!chatProvider) return { ok: false as const, error: "AI is not available right now." };
+    const providerResult = await resolveChatProvider(user?.id ?? null);
+    if (!providerResult.ok) return { ok: false as const, error: providerResult.error };
+    const chatProvider = providerResult.value;
 
     const avoid =
       data.exclude && data.exclude.length > 0

@@ -37,10 +37,11 @@ export const Route = createFileRoute("/api/chat")({
     handlers: {
       POST: async ({ request }) => {
         const session = await auth.api.getSession({ headers: request.headers }).catch(() => null);
-        const chatProvider = await resolveChatProvider(session?.user?.id ?? null);
-        if (!chatProvider) {
-          return Response.json({ error: "AI is not available right now." }, { status: 503 });
+        const providerResult = await resolveChatProvider(session?.user?.id ?? null);
+        if (!providerResult.ok) {
+          return Response.json({ error: providerResult.error }, { status: 503 });
         }
+        const chatProvider = providerResult.value;
 
         let json: unknown;
         try {
