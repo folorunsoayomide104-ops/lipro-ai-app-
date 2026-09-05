@@ -679,6 +679,12 @@ export function StudioApp() {
               >
                 Admin
               </Link>
+              <Link
+                to="/settings"
+                className="hidden h-9 items-center rounded-full px-3 text-xs text-muted hover:text-fg sm:inline-flex"
+              >
+                Settings
+              </Link>
               <UserButton />
             </div>
           </header>
