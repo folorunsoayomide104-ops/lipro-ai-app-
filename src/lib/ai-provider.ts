@@ -108,7 +108,11 @@ function isInCooldown(apiKey: string, model: string): boolean {
 }
 
 const PROBE_POOL_SIZE = 20;
-const PROBE_TIMEOUT_MS = 8_000;
+// Probes run in parallel, so worst case is ~one timeout, not the sum — but a
+// dead model 404s in well under a second, so there's no reason for this to be
+// as generous as a real-generation timeout; keep it short so a cache-miss
+// discovery doesn't eat too much of the same 60s the actual generation needs.
+const PROBE_TIMEOUT_MS = 6_000;
 
 /**
  * `GET /v1/models` lists NVIDIA's whole hosted catalog, NOT what this key can
@@ -269,13 +273,21 @@ export async function resolveChatProvider(userId: string | null): Promise<ChatPr
  * by `scripts/set-function-duration.mjs` — Nitro's Vercel preset doesn't set
  * one itself, which is what caused the 504s: the function was being killed at
  * the platform default before a slow/broken model could even time out here).
- * Attempt budgets below are sized to leave real margin under that 60s cap for
- * DB/session overhead and the actual generation time of whichever candidate
- * succeeds — they are NOT just "how long until we give up," they're "how much
- * of the 60s can fallback attempts spend before the real work needs the rest."
+ *
+ * A *fixed* per-attempt timeout doesn't work for the non-streaming path
+ * either, which is why the values below aren't just "how long until we give
+ * up" — they budget total wall-clock time across all attempts instead. A dead
+ * (404/not-provisioned) candidate fails in well under a second regardless of
+ * the timeout, while a genuinely working model generating `max_tokens: 3500`
+ * of JSON can legitimately take 20-40s; an earlier fixed 8s cap here killed
+ * real, working generations before they could finish and mislabeled them as
+ * failures — the actual bug behind a "Could not write questions (504)"
+ * report even after a valid model was found.
  */
+const NON_STREAM_TOTAL_BUDGET_MS = 45_000; // leaves ~15s of the 60s cap for DB/session + a cache-miss discovery probe
+const NON_STREAM_PER_ATTEMPT_CAP_MS = 35_000; // generous for one real generation, but leaves room to fall back once
+const NON_STREAM_MIN_ATTEMPT_MS = 12_000; // don't start an attempt that can't possibly finish
 const NON_STREAM_MAX_ATTEMPTS = 3;
-const NON_STREAM_TIMEOUT_MS = 8_000; // worst case 3 x 8s = 24s, ~35s left for a real answer
 const STREAM_MAX_ATTEMPTS = 4;
 /** Streaming only needs to bound time-to-*first-byte* — once a candidate's
  *  headers/body arrive we commit to it for the rest of the generation, no
@@ -329,9 +341,14 @@ export async function completeChatWithFallback(
   body: FallbackBody,
 ): Promise<{ ok: true; json: unknown; modelUsed: string } | { ok: false; status: number; error: string }> {
   const models = candidatesToTry(provider, NON_STREAM_MAX_ATTEMPTS);
+  const deadline = Date.now() + NON_STREAM_TOTAL_BUDGET_MS;
   let lastStatus = 503;
 
   for (const model of models) {
+    const remaining = deadline - Date.now();
+    if (remaining < NON_STREAM_MIN_ATTEMPT_MS) break;
+    const attemptTimeout = Math.min(remaining, NON_STREAM_PER_ATTEMPT_CAP_MS);
+
     let res: Response;
     try {
       res = await fetchWithTimeout(
@@ -350,7 +367,7 @@ export async function completeChatWithFallback(
             messages: body.messages,
           }),
         },
-        NON_STREAM_TIMEOUT_MS,
+        attemptTimeout,
       );
     } catch {
       lastStatus = 504;
