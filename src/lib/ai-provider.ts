@@ -209,15 +209,26 @@ export async function resolveChatProvider(userId: string | null): Promise<ChatPr
   return { ok: false, error: "AI is not available right now." };
 }
 
-const MAX_ATTEMPTS = 4;
-const NON_STREAM_TIMEOUT_MS = 12_000;
+/**
+ * The whole Vercel function has a 60s hard cap (`maxDuration`, set post-build
+ * by `scripts/set-function-duration.mjs` — Nitro's Vercel preset doesn't set
+ * one itself, which is what caused the 504s: the function was being killed at
+ * the platform default before a slow/broken model could even time out here).
+ * Attempt budgets below are sized to leave real margin under that 60s cap for
+ * DB/session overhead and the actual generation time of whichever candidate
+ * succeeds — they are NOT just "how long until we give up," they're "how much
+ * of the 60s can fallback attempts spend before the real work needs the rest."
+ */
+const NON_STREAM_MAX_ATTEMPTS = 3;
+const NON_STREAM_TIMEOUT_MS = 8_000; // worst case 3 x 8s = 24s, ~35s left for a real answer
+const STREAM_MAX_ATTEMPTS = 4;
 /** Streaming only needs to bound time-to-*first-byte* — once a candidate's
  *  headers/body arrive we commit to it for the rest of the generation, no
  *  matter how long a genuine answer takes to finish. */
-const STREAM_TTFB_TIMEOUT_MS = 6_000;
+const STREAM_TTFB_TIMEOUT_MS = 6_000; // worst case 4 x 6s = 24s, ~35s left to stream the answer
 
-function candidatesToTry(provider: ChatProvider): string[] {
-  return provider.candidates.slice(0, MAX_ATTEMPTS);
+function candidatesToTry(provider: ChatProvider, maxAttempts: number): string[] {
+  return provider.candidates.slice(0, maxAttempts);
 }
 
 async function fetchWithTimeout(
@@ -262,7 +273,7 @@ export async function completeChatWithFallback(
   provider: ChatProvider,
   body: FallbackBody,
 ): Promise<{ ok: true; json: unknown; modelUsed: string } | { ok: false; status: number; error: string }> {
-  const models = candidatesToTry(provider);
+  const models = candidatesToTry(provider, NON_STREAM_MAX_ATTEMPTS);
   let lastStatus = 503;
 
   for (const model of models) {
@@ -326,7 +337,7 @@ export async function startChatStreamWithFallback(
   | { ok: true; response: Response; modelUsed: string }
   | { ok: false; status: number; error: string }
 > {
-  const models = candidatesToTry(provider);
+  const models = candidatesToTry(provider, STREAM_MAX_ATTEMPTS);
   let lastStatus = 503;
 
   for (const model of models) {
