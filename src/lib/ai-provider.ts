@@ -107,7 +107,7 @@ function isInCooldown(apiKey: string, model: string): boolean {
   return Boolean(entry && entry.brokenUntil > Date.now());
 }
 
-const PROBE_POOL_SIZE = 20;
+const PROBE_POOL_SIZE = 100; // wider than NVIDIA's ~68-model catalog on purpose — probe everything, not a guessed subset
 // Probes run in parallel, so worst case is ~one timeout, not the sum — but a
 // dead model 404s in well under a second, so there's no reason for this to be
 // as generous as a real-generation timeout; keep it short so a cache-miss
@@ -193,11 +193,23 @@ async function resolveNvidiaModels(
     .map((m) => m.id)
     .filter((id): id is string => typeof id === "string" && id.length > 0);
 
-  const preferred = PREFERRED_NVIDIA_MODELS.filter((id) => ids.includes(id));
+  // Nemotron (NVIDIA's own model family) first — several diverse publishers
+  // (IBM, Mistral, DeepSeek, Microsoft, ...) have already come back
+  // "not provisioned for this account" in practice, so trying every Nemotron
+  // variant the catalog lists is worth doing before falling through to a
+  // generic size-ranked sweep of everything else.
+  const nemotron = ids.filter((id) => /nemotron/i.test(id) && looksLikeChatModel(id));
+  const preferred = PREFERRED_NVIDIA_MODELS.filter(
+    (id) => ids.includes(id) && !nemotron.includes(id),
+  );
   const rest = ids
-    .filter((id) => !preferred.includes(id) && looksLikeChatModel(id))
+    .filter((id) => !nemotron.includes(id) && !preferred.includes(id) && looksLikeChatModel(id))
     .sort((a, b) => sizeRank(a) - sizeRank(b));
-  const rankedPool = [...preferred, ...rest].slice(0, PROBE_POOL_SIZE);
+  // Probe the WHOLE live catalog, not just a ranked slice — this account has
+  // already 404'd on every model tried across every publisher so far, so
+  // narrowing the pool before probing risks missing the one that actually
+  // works. PROBE_POOL_SIZE is generous enough to cover NVIDIA's full catalog.
+  const rankedPool = [...nemotron, ...preferred, ...rest].slice(0, PROBE_POOL_SIZE);
 
   const probeResults = await Promise.all(
     rankedPool.map(async (model) => ({ model, ok: await probeModel(apiKey, model) })),
