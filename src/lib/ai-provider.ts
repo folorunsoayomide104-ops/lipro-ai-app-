@@ -107,13 +107,60 @@ function isInCooldown(apiKey: string, model: string): boolean {
   return Boolean(entry && entry.brokenUntil > Date.now());
 }
 
+const PROBE_POOL_SIZE = 20;
+const PROBE_TIMEOUT_MS = 8_000;
+
+/**
+ * `GET /v1/models` lists NVIDIA's whole hosted catalog, NOT what this key can
+ * actually invoke — most catalog entries are NIM containers that need their
+ * own deployment and 404 with `"Function '<id>' not found for account"` on a
+ * real completion call even though they're listed. Ranking by name/size alone
+ * (the previous approach) kept picking models that looked right but had never
+ * once been callable by this key, so every real request burned its whole
+ * fallback budget on guaranteed 404s. This probes a batch of ranked
+ * candidates with a trivial real completion call and keeps only the ones
+ * that actually answer — evidence, not a heuristic.
+ */
+async function probeModel(apiKey: string, model: string): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout(
+      NVIDIA_CHAT_URL,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          stream: false,
+          max_tokens: 1,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      },
+      PROBE_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      const bodyText = await res.text().catch(() => "");
+      console.error(`[ai-provider] probe ${model} ${res.status}: ${bodyText.slice(0, 300)}`);
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Ask NVIDIA which chat-capable models are actually live for this key right
  * now, instead of trusting hardcoded model ids NVIDIA can (and does) retire
- * without much notice. Returns a ranked list (small/fast first), not a
+ * without much notice — AND instead of trusting the catalog listing at all,
+ * since being *listed* doesn't mean this key can *call* it (see `probeModel`).
+ * Returns a ranked, real-probe-validated list (small/fast first), not a
  * single pick, so callers can fall back across it. Cached briefly per key so
- * most requests skip the extra round trip — the catalog itself changes far
- * less often than any individual model's actual health.
+ * most requests skip the extra round trip — the catalog itself, and which
+ * models are actually provisioned for this key, both change far less often
+ * than an individual model's moment-to-moment health.
  */
 async function resolveNvidiaModels(
   apiKey: string,
@@ -146,7 +193,12 @@ async function resolveNvidiaModels(
   const rest = ids
     .filter((id) => !preferred.includes(id) && looksLikeChatModel(id))
     .sort((a, b) => sizeRank(a) - sizeRank(b));
-  const ranked = [...preferred, ...rest].slice(0, MAX_CANDIDATES);
+  const rankedPool = [...preferred, ...rest].slice(0, PROBE_POOL_SIZE);
+
+  const probeResults = await Promise.all(
+    rankedPool.map(async (model) => ({ model, ok: await probeModel(apiKey, model) })),
+  );
+  const ranked = probeResults.filter((r) => r.ok).map((r) => r.model).slice(0, MAX_CANDIDATES);
 
   nvidiaModelListCache.set(apiKey, {
     models: ranked.length ? ranked : null,
@@ -154,7 +206,10 @@ async function resolveNvidiaModels(
   });
   return ranked.length
     ? { models: ranked }
-    : { error: "No usable chat model found in your NVIDIA account." };
+    : {
+        error:
+          "No NVIDIA model in your account could be reached (all returned 404/not-provisioned). Check your NVIDIA API Catalog access.",
+      };
 }
 
 async function userNvidiaKey(userId: string | null): Promise<string | null> {
