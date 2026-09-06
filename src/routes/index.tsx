@@ -9,7 +9,7 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "LIPRO is a private Grok studio for thinking, exam papers, flashcards, and images. Life in progress.",
+          "LIPRO is a private studio for thinking, exam papers, flashcards, and images. Life in progress.",
       },
     ],
   }),

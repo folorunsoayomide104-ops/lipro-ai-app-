@@ -366,7 +366,7 @@ function EmptyState({
         LIPRO
       </h1>
       <p className="mt-3 max-w-sm text-base leading-normal text-muted aether-rise aether-rise-delay-2">
-        Life in progress. A private studio for thinking with Grok.
+        Life in progress. A private studio for thinking.
       </p>
       <div className="mt-8 flex flex-col gap-2 aether-rise aether-rise-delay-3">
         {starters.map((starter) => (
@@ -518,7 +518,7 @@ export function StudioApp() {
       });
 
       if (!res.ok) {
-        let err = "Grok could not reply.";
+        let err = "LIPRO could not reply.";
         try {
           const body = (await res.json()) as { error?: string };
           if (body.error) err = body.error;

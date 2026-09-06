@@ -13,7 +13,7 @@ export const Route = createRootRoute({
       { title: APP_NAME },
       {
         name: "description",
-        content: "LIPRO is a private Grok studio for thinking, exam papers, flashcards, and images. Life in progress.",
+        content: "LIPRO is a private studio for thinking, exam papers, flashcards, and images. Life in progress.",
       },
       { name: "theme-color", content: "#0b0b0c" },
     ],

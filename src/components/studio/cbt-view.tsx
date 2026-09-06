@@ -375,7 +375,7 @@ function SetupForm({
         </div>
         {count >= 50 ? (
           <p className="mt-3 text-xs text-subtle">
-            {count} questions uses more Grok usage. 20 is a solid paper.
+            {count} questions uses more AI usage. 20 is a solid paper.
           </p>
         ) : null}
       </div>

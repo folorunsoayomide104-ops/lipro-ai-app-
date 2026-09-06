@@ -7,7 +7,7 @@ const FEATURES = [
   {
     kicker: "Chat",
     title: "Think with a lens.",
-    body: "LIPRO, Muse, Scholar, Maker, Confidant. Grok answers in the voice you pick — clear, not theatrical.",
+    body: "LIPRO, Muse, Scholar, Maker, Confidant. Answers in the voice you pick — clear, not theatrical.",
   },
   {
     kicker: "Exam",
@@ -43,8 +43,8 @@ export function HomePage() {
           progress.
         </h1>
         <p className="mt-6 max-w-xl text-base leading-relaxed text-muted aether-rise aether-rise-delay-2 md:text-lg">
-          LIPRO is a private studio for thinking, examining, and remembering — with Grok in the
-          room. Built for people who study like it matters.
+          LIPRO is a private studio for thinking, examining, and remembering. Built for people
+          who study like it matters.
         </p>
         <div className="mt-10 flex flex-wrap gap-3 aether-rise aether-rise-delay-3">
           <Button asChild>

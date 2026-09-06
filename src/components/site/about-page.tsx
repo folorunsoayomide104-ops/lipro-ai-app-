@@ -10,7 +10,7 @@ export function AboutPage() {
         <h1 className="mt-4 font-display text-4xl tracking-tight md:text-6xl">Life in progress.</h1>
         <div className="mt-10 space-y-6 text-base leading-relaxed text-muted md:text-lg">
           <p className="text-fg">
-            LIPRO is a private Grok studio for people who would rather work than perform.
+            LIPRO is a private studio for people who would rather work than perform.
           </p>
           <p>
             Chat when you need a mind in the room. Exam when the notes have to become a paper.
