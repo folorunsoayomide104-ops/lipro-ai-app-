@@ -23,6 +23,14 @@ export type ChatProvider = {
    *  across models, so JSON-mode callers (exam/cards) should skip that field
    *  on this provider and lean on their own fenced-JSON parsing instead. */
   supportsJsonMode: boolean;
+  /** `Date.now() + REQUEST_BUDGET_MS`, fixed once at the top of
+   *  `resolveChatProvider` and carried through everything downstream — the
+   *  discovery/probe phase AND the real generation call must share ONE
+   *  deadline, not each get their own independent budget. Two independent
+   *  "generous" budgets (e.g. 15s discovery + 45s generation) can still sum
+   *  past the function's own 60s `maxDuration` on a cache-miss request; a
+   *  single shared deadline can't. */
+  requestDeadline: number;
 };
 
 export type ChatProviderResult =
@@ -33,6 +41,13 @@ const NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const NVIDIA_MODELS_URL = "https://integrate.api.nvidia.com/v1/models";
 const XAI_BASE_URL = "https://api.x.ai/v1/chat/completions";
 const XAI_MODEL = "grok-4.5";
+
+/** The whole Vercel function has a 60s hard cap (`maxDuration`, set post-build
+ *  by `scripts/set-function-duration.mjs`). This is the ONE budget every
+ *  phase of a request (discovery/probing, then the real generation call)
+ *  shares — see `ChatProvider.requestDeadline`. 50s leaves ~10s margin for
+ *  DB/session lookups, cold start, and the platform's own overhead. */
+const REQUEST_BUDGET_MS = 50_000;
 
 /**
  * Tie-break preference among whatever NVIDIA's *live* catalog actually
@@ -245,6 +260,7 @@ async function mapWithConcurrency<T, R>(
  */
 async function resolveNvidiaModels(
   apiKey: string,
+  requestDeadline: number,
 ): Promise<{ models: string[] } | { error: string }> {
   const cached = nvidiaModelListCache.get(apiKey);
   if (cached && cached.expiresAt > Date.now()) {
@@ -288,7 +304,10 @@ async function resolveNvidiaModels(
   // works. PROBE_POOL_SIZE is generous enough to cover NVIDIA's full catalog.
   const rankedPool = [...nemotron, ...preferred, ...rest].slice(0, PROBE_POOL_SIZE);
 
-  const probeDeadline = Date.now() + PROBE_PHASE_BUDGET_MS;
+  // Capped by PROBE_PHASE_BUDGET_MS as before, but never allowed past the
+  // one shared request deadline — a cache-miss discovery must still leave
+  // enough of the 60s budget for the real generation call that follows.
+  const probeDeadline = Math.min(Date.now() + PROBE_PHASE_BUDGET_MS, requestDeadline);
   const probeResults = await mapWithConcurrency(rankedPool, PROBE_CONCURRENCY, probeDeadline, (model) =>
     probeModel(apiKey, model),
   );
@@ -335,9 +354,13 @@ async function userNvidiaKey(userId: string | null): Promise<string | null> {
  * personal key, the shared xAI key is used; with neither, `ok: false`.
  */
 export async function resolveChatProvider(userId: string | null): Promise<ChatProviderResult> {
+  // Fixed ONCE here, before any discovery/probing work happens, so that work
+  // and the real generation call afterward draw from the same clock instead
+  // of each getting their own fresh budget (see `ChatProvider.requestDeadline`).
+  const requestDeadline = Date.now() + REQUEST_BUDGET_MS;
   const nvidiaKey = await userNvidiaKey(userId);
   if (nvidiaKey) {
-    const resolved = await resolveNvidiaModels(nvidiaKey);
+    const resolved = await resolveNvidiaModels(nvidiaKey, requestDeadline);
     if ("error" in resolved) return { ok: false, error: resolved.error };
     const live = resolved.models.filter((m) => !isInCooldown(nvidiaKey, m));
     const candidates = live.length ? live : resolved.models;
@@ -349,6 +372,7 @@ export async function resolveChatProvider(userId: string | null): Promise<ChatPr
         baseUrl: NVIDIA_CHAT_URL,
         candidates,
         supportsJsonMode: false,
+        requestDeadline,
       },
     };
   }
@@ -362,6 +386,7 @@ export async function resolveChatProvider(userId: string | null): Promise<ChatPr
         baseUrl: XAI_BASE_URL,
         candidates: [XAI_MODEL],
         supportsJsonMode: true,
+        requestDeadline,
       },
     };
   }
@@ -371,28 +396,31 @@ export async function resolveChatProvider(userId: string | null): Promise<ChatPr
 /**
  * The whole Vercel function has a 60s hard cap (`maxDuration`, set post-build
  * by `scripts/set-function-duration.mjs` — Nitro's Vercel preset doesn't set
- * one itself, which is what caused the 504s: the function was being killed at
- * the platform default before a slow/broken model could even time out here).
+ * one itself, which is what originally caused 504s: the function was being
+ * killed at the platform default before a slow/broken model could even time
+ * out here).
  *
  * A *fixed* per-attempt timeout doesn't work for the non-streaming path
- * either, which is why the values below aren't just "how long until we give
- * up" — they budget total wall-clock time across all attempts instead. A dead
- * (404/not-provisioned) candidate fails in well under a second regardless of
- * the timeout, while a genuinely working model generating `max_tokens: 3500`
- * of JSON can legitimately take 20-40s; an earlier fixed 8s cap here killed
- * real, working generations before they could finish and mislabeled them as
- * failures — the actual bug behind a "Could not write questions (504)"
- * report even after a valid model was found.
+ * either — a dead (404/not-provisioned) candidate fails in well under a
+ * second regardless of the timeout, while a genuinely working model
+ * generating `max_tokens: 3500` of JSON can legitimately take 20-40s; an
+ * earlier fixed 8s cap here killed real, working generations before they
+ * could finish. So attempts are budgeted against `provider.requestDeadline`
+ * (fixed once in `resolveChatProvider`, BEFORE discovery/probing ran) rather
+ * than a fresh timer started here — two independently "generous" budgets
+ * (discovery's ~15s + a fresh 45s here) can still sum past the 60s cap on a
+ * cache-miss request; counting down from one shared deadline can't.
  */
-const NON_STREAM_TOTAL_BUDGET_MS = 45_000; // leaves ~15s of the 60s cap for DB/session + a cache-miss discovery probe
 const NON_STREAM_PER_ATTEMPT_CAP_MS = 35_000; // generous for one real generation, but leaves room to fall back once
 const NON_STREAM_MIN_ATTEMPT_MS = 12_000; // don't start an attempt that can't possibly finish
 const NON_STREAM_MAX_ATTEMPTS = 3;
 const STREAM_MAX_ATTEMPTS = 4;
 /** Streaming only needs to bound time-to-*first-byte* — once a candidate's
  *  headers/body arrive we commit to it for the rest of the generation, no
- *  matter how long a genuine answer takes to finish. */
-const STREAM_TTFB_TIMEOUT_MS = 6_000; // worst case 4 x 6s = 24s, ~35s left to stream the answer
+ *  matter how long a genuine answer takes to finish. Also budgeted against
+ *  the shared `provider.requestDeadline`, same reasoning as above. */
+const STREAM_TTFB_TIMEOUT_MS = 6_000;
+const STREAM_MIN_ATTEMPT_MS = 2_000;
 
 function candidatesToTry(provider: ChatProvider, maxAttempts: number): string[] {
   return provider.candidates.slice(0, maxAttempts);
@@ -441,11 +469,10 @@ export async function completeChatWithFallback(
   body: FallbackBody,
 ): Promise<{ ok: true; json: unknown; modelUsed: string } | { ok: false; status: number; error: string }> {
   const models = candidatesToTry(provider, NON_STREAM_MAX_ATTEMPTS);
-  const deadline = Date.now() + NON_STREAM_TOTAL_BUDGET_MS;
   let lastStatus = 503;
 
   for (const model of models) {
-    const remaining = deadline - Date.now();
+    const remaining = provider.requestDeadline - Date.now();
     if (remaining < NON_STREAM_MIN_ATTEMPT_MS) break;
     const attemptTimeout = Math.min(remaining, NON_STREAM_PER_ATTEMPT_CAP_MS);
 
@@ -513,6 +540,10 @@ export async function startChatStreamWithFallback(
   let lastStatus = 503;
 
   for (const model of models) {
+    const remaining = provider.requestDeadline - Date.now();
+    if (remaining < STREAM_MIN_ATTEMPT_MS) break;
+    const attemptTimeout = Math.min(remaining, STREAM_TTFB_TIMEOUT_MS);
+
     let res: Response;
     try {
       res = await fetchWithTimeout(
@@ -530,7 +561,7 @@ export async function startChatStreamWithFallback(
             messages: body.messages,
           }),
         },
-        STREAM_TTFB_TIMEOUT_MS,
+        attemptTimeout,
       );
     } catch {
       lastStatus = 504;
