@@ -43,8 +43,19 @@ const XAI_MODEL = "grok-4.5";
  * one live candidate is available, and is never relied on to exist.
  */
 const PREFERRED_NVIDIA_MODELS = [
-  // Confirmed reachable on this account (user-supplied working sample) — try
-  // it before anything merely guessed-at from naming conventions.
+  // Confirmed reachable on THIS account — real probes against these three
+  // came back "Worker local total request limit reached" / "Service
+  // temporarily overloaded" (503), which only happens once NVIDIA's routing
+  // layer has found a real, provisioned worker pool for the account and it's
+  // simply busy — a structurally different failure from the "Function not
+  // found for account" 404 that ~46 other probed models all returned. That
+  // makes these the strongest evidence of a working model we have.
+  "nvidia/nemotron-3-super-120b-a12b",
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+  "poolside/laguna-xs-2.1",
+  // User-supplied working sample for this id — kept even though it hasn't
+  // shown up in this account's own /v1/models listing yet (catalogs can
+  // differ by moment/region), in case it appears.
   "meta/muse-glimmer-30b",
   "meta/llama-3.1-8b-instruct",
   "nvidia/llama-3.1-nemotron-nano-8b-v1",
@@ -63,7 +74,7 @@ const PREFERRED_NVIDIA_MODELS = [
  * Denylist only the kinds that are unambiguously not text-chat.
  */
 const NON_CHAT_HINTS =
-  /embed|rerank|guard|vision|tts|asr|whisper|clip|ocr|moderat|safety|reward|classif|-parse\b|parse-|retriev|codec/;
+  /embed|rerank|guard|vision|tts|asr|whisper|clip|ocr|moderat|safety|reward|classif|-parse\b|parse-|retriev|codec|detector|video/;
 
 function looksLikeChatModel(id: string): boolean {
   return !NON_CHAT_HINTS.test(id.toLowerCase());
@@ -122,6 +133,19 @@ const PROBE_POOL_SIZE = 100; // wider than NVIDIA's ~68-model catalog on purpose
 // as generous as a real-generation timeout; keep it short so a cache-miss
 // discovery doesn't eat too much of the same 60s the actual generation needs.
 const PROBE_TIMEOUT_MS = 6_000;
+// Bounded, not all-at-once — three genuinely-provisioned models in this
+// account came back "Worker local total request limit reached" during a
+// ~100-way simultaneous probe burst, which is itself the kind of load that
+// causes that error. Keep discovery reasonably fast without being the thing
+// that makes a real candidate look broken.
+const PROBE_CONCURRENCY = 8;
+// Hard ceiling on the whole discovery phase, independent of pool size —
+// leaves the rest of the 60s function budget for the real generation call
+// that follows on a cache miss. At concurrency 8 this covers roughly
+// 8 x (15s / typical sub-second 404) ≈ many dozens of candidates in
+// practice; a genuinely slow/hanging probe just gets cut off rather than
+// blocking discovery.
+const PROBE_PHASE_BUDGET_MS = 15_000;
 
 /**
  * `GET /v1/models` lists NVIDIA's whole hosted catalog, NOT what this key can
@@ -134,7 +158,20 @@ const PROBE_TIMEOUT_MS = 6_000;
  * candidates with a trivial real completion call and keeps only the ones
  * that actually answer — evidence, not a heuristic.
  */
-async function probeModel(apiKey: string, model: string): Promise<boolean> {
+/**
+ * "not_found" (404, `Function '<id>' not found for account`) is the ONLY
+ * response that proves a model is permanently unusable for this key — it
+ * means NVIDIA's routing layer never located a provisioned worker pool at
+ * all. Every other non-2xx (429/500/503, "Service temporarily overloaded",
+ * "Worker local total request limit reached") means routing DID find a real,
+ * provisioned pool for this model and it's just currently busy/erroring —
+ * that's a MODEL THAT WORKS, observed under momentary load. Collapsing these
+ * into one "false" (the original version of this function) silently threw
+ * away the only real working candidates this account has.
+ */
+type ProbeResult = "ok" | "not_found" | "maybe";
+
+async function probeModel(apiKey: string, model: string): Promise<ProbeResult> {
   try {
     const res = await fetchWithTimeout(
       NVIDIA_CHAT_URL,
@@ -153,15 +190,46 @@ async function probeModel(apiKey: string, model: string): Promise<boolean> {
       },
       PROBE_TIMEOUT_MS,
     );
-    if (!res.ok) {
-      const bodyText = await res.text().catch(() => "");
-      console.error(`[ai-provider] probe ${model} ${res.status}: ${bodyText.slice(0, 300)}`);
-      return false;
-    }
-    return true;
+    if (res.ok) return "ok";
+    const bodyText = await res.text().catch(() => "");
+    console.error(`[ai-provider] probe ${model} ${res.status}: ${bodyText.slice(0, 300)}`);
+    return res.status === 404 ? "not_found" : "maybe";
   } catch {
-    return false;
+    // A timeout/network error during the probe doesn't prove the model is
+    // dead (it may just be as busy as the "maybe" cases above) — treat it
+    // the same as "maybe" rather than discarding it outright.
+    return "maybe";
   }
+}
+
+/** Runs `fn` over `items` with at most `limit` in flight at once, and stops
+ *  starting new work once `deadlineAt` has passed (in-flight calls still
+ *  finish under their own timeout). Probing NVIDIA's whole catalog as one
+ *  giant Promise.all was almost certainly contributing to the "Worker local
+ *  total request limit reached" 503s seen on genuinely-working models — this
+ *  account's own probe burst was part of the load. Bounded concurrency keeps
+ *  discovery from being the thing that makes a real candidate look busy;
+ *  the deadline keeps a large pool (e.g. probing NVIDIA's whole catalog)
+ *  from ever eating the same request budget the real generation call needs,
+ *  no matter how many items are in `items`. Items not reached before the
+ *  deadline are simply omitted, not treated as failures. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  deadlineAt: number,
+  fn: (item: T) => Promise<R>,
+): Promise<{ item: T; result: R }[]> {
+  const results: { item: T; result: R }[] = [];
+  let next = 0;
+  async function worker() {
+    while (Date.now() < deadlineAt) {
+      const i = next++;
+      if (i >= items.length) return;
+      results.push({ item: items[i], result: await fn(items[i]) });
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 /**
@@ -220,10 +288,21 @@ async function resolveNvidiaModels(
   // works. PROBE_POOL_SIZE is generous enough to cover NVIDIA's full catalog.
   const rankedPool = [...nemotron, ...preferred, ...rest].slice(0, PROBE_POOL_SIZE);
 
-  const probeResults = await Promise.all(
-    rankedPool.map(async (model) => ({ model, ok: await probeModel(apiKey, model) })),
+  const probeDeadline = Date.now() + PROBE_PHASE_BUDGET_MS;
+  const probeResults = await mapWithConcurrency(rankedPool, PROBE_CONCURRENCY, probeDeadline, (model) =>
+    probeModel(apiKey, model),
   );
-  const ranked = probeResults.filter((r) => r.ok).map((r) => r.model).slice(0, MAX_CANDIDATES);
+  // Keep everything except confirmed-nonexistent (404). Put real successes
+  // ("ok") ahead of "maybe" (busy/erroring, but provisioned) — a stable sort
+  // so ties preserve rankedPool's order (nemotron/preferred/size-ranked),
+  // which is also the order items were dispatched in, so it doubles as
+  // "probed earlier" for anything the deadline cut off.
+  const ranked = probeResults
+    .filter((r) => r.result !== "not_found")
+    .map((r, i) => ({ ...r, i }))
+    .sort((a, b) => (a.result === b.result ? a.i - b.i : a.result === "ok" ? -1 : 1))
+    .map((r) => r.item)
+    .slice(0, MAX_CANDIDATES);
 
   nvidiaModelListCache.set(apiKey, {
     models: ranked.length ? ranked : null,
