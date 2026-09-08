@@ -43,6 +43,9 @@ const XAI_MODEL = "grok-4.5";
  * one live candidate is available, and is never relied on to exist.
  */
 const PREFERRED_NVIDIA_MODELS = [
+  // Confirmed reachable on this account (user-supplied working sample) — try
+  // it before anything merely guessed-at from naming conventions.
+  "meta/muse-glimmer-30b",
   "meta/llama-3.1-8b-instruct",
   "nvidia/llama-3.1-nemotron-nano-8b-v1",
   "mistralai/mistral-nemotron",
@@ -50,14 +53,20 @@ const PREFERRED_NVIDIA_MODELS = [
   "nvidia/llama-3.3-nemotron-super-49b-v1",
 ];
 
+/**
+ * `meta/muse-glimmer-30b` — a real, working model on this very account —
+ * matches none of "instruct|chat|nemotron", which is what the old allowlist
+ * regex required. NVIDIA's naming conventions vary too much for an allowlist
+ * to be safe: it silently excludes valid chat models from ever being probed
+ * at all, which is strictly worse than probing a few extra non-chat ones
+ * (probing is cheap and already tells the true story via the response).
+ * Denylist only the kinds that are unambiguously not text-chat.
+ */
 const NON_CHAT_HINTS =
-  /embed|rerank|guard|vision|tts|asr|whisper|clip|ocr|moderat|safety|reward|classif/;
-const CHAT_HINTS = /instruct|chat|nemotron/;
+  /embed|rerank|guard|vision|tts|asr|whisper|clip|ocr|moderat|safety|reward|classif|-parse\b|parse-|retriev|codec/;
 
 function looksLikeChatModel(id: string): boolean {
-  const lower = id.toLowerCase();
-  if (NON_CHAT_HINTS.test(lower)) return false;
-  return CHAT_HINTS.test(lower);
+  return !NON_CHAT_HINTS.test(id.toLowerCase());
 }
 
 /** Rough parameter-count hint parsed from a model id, used only to rank
